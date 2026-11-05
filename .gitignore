@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 虚拟环境 (uv 管理)
+.venv/
+
+# 生成物: 离屏渲染帧与 RL checkpoint
+examples/output/
