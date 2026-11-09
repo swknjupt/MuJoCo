@@ -1,0 +1,12 @@
+[Unit]
+Description=RT batch runner (executes queued jobs when booting the RT kernel)
+After=local-fs.target
+ConditionPathExists=/var/local/rt-batch/queue
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rt-batch-run.sh
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
