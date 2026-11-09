@@ -1,0 +1,29 @@
+<mujoco model="pendulum_env">
+  <!-- D1.1 专用单摆模型：起摆任务需要无限位摆（原 examples/models/pendulum.xml
+       限位 ±90°，永远到不了倒立位）。物理参数与原模型一致：
+       杆长 0.8m / 质量 1kg / 阻尼 0.05 / 电机 ±5 N·m。
+       timestep=0.001 对应 1kHz PD 子步（decimation=10 → 策略 100Hz）。 -->
+  <option timestep="0.001" gravity="0 0 -9.81"/>
+
+  <worldbody>
+    <light name="top_light" pos="0 0 3" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
+    <geom name="floor" type="plane" size="2 2 0.1" rgba="0.85 0.85 0.85 1"/>
+
+    <body name="pole" pos="0 0 1.2">
+      <!-- qpos=0 为竖直下垂；倒立位为 ±π。无限位：包络/终止由 env 软件层判定 -->
+      <joint name="hinge" type="hinge" axis="0 1 0" damping="0.05"/>
+      <geom name="rod" type="capsule" fromto="0 0 0  0 0 -0.8"
+            size="0.03" mass="1" rgba="0.2 0.7 0.3 1"/>
+      <site name="tip" pos="0 0 -0.8" size="0.02"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="motor" joint="hinge" gear="1" ctrlrange="-5 5"/>
+  </actuator>
+
+  <sensor>
+    <jointpos name="angle_sensor" joint="hinge"/>
+    <jointvel name="angvel_sensor" joint="hinge"/>
+  </sensor>
+</mujoco>
