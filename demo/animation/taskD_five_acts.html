@@ -86,10 +86,13 @@ class Pend {
 }
 
 // ================= 控制器（策略层） =================
-// 能量泵：把摆从悬垂泵到倒立（E_target = 倒立位能量 2*m*g*lc）
+// 能量泵（Åström 式）：τ = sat(k·(E_target−E))·sign(ω)，不带任何偏置——
+// 偏置会在 E≈E_target 处净注入能量，导致越转越快永不收敛（2026-11-10 两次实测修复）
 function pump(pd, tauCap) {
   const E = energy(pd.th, pd.om), Et = 2 * M * G * LC;
-  const mag = Math.min(0.8 * Math.abs(Et - E) + 0.3, tauCap);
+  const eErr = Et - E;
+  if (eErr <= 0) return 0;                    // 已达标：不再加力，靠惯性过顶
+  const mag = Math.min(0.8 * eErr, tauCap);
   return pd.om >= 0 ? mag : -mag;
 }
 // 平衡：直立附近的 PD（可注入反馈延迟）
@@ -159,9 +162,9 @@ function tick(side, act) {
   const pd = side.pend;
   let tauPolicy;
   if (!act.fault) {
-    const nearTop = Math.abs(wrapPi(pd.th - Math.PI)) < 0.6 && Math.abs(pd.om) < 5;
+    const nearTop = Math.abs(wrapPi(pd.th - Math.PI)) < 0.6 && Math.abs(pd.om) < 6;
     if (nearTop) side.hold = true;
-    if (side.hold && Math.abs(wrapPi(pd.th - Math.PI)) > 1.0) side.hold = false;  // 迟滞
+    if (side.hold && Math.abs(wrapPi(pd.th - Math.PI)) > 1.3) side.hold = false;  // 迟滞：给 PD 刹车留足距离
     tauPolicy = side.hold ? balance(pd, act.delay, side.buf) : pump(pd, 4.0);
   } else {
     side.hold = false;
