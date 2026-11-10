@@ -8,6 +8,8 @@
     人工复位才回）；
   - 触发（任一）: |θ|、|θ̇|、|τ| 越限；策略输出过期 > staleness_max；
     overrun 连续 > streak_limit 拍；
+  - 角度包络采用 armed 语义：正常起摆从悬垂到倒立必须经过 100°，
+    因此角度越界只在曾接近直立后生效；速度/力矩/失联/overrun 始终生效；
   - FALLBACK: 能量法——施加与速度反号、与（相对悬垂的）能量成正比的阻尼力矩，
     把摆缓缓放回下垂位；能量低于阈值 → SAFE（保持阻尼/抱闸）；
   - 纯确定性代码：无动态分配、无外部调用、无浮点环境依赖以外的状态。
@@ -45,7 +47,12 @@ class GovernorOutput:
 @dataclass(frozen=True)
 class GovernorParams:
     # 包络（与 taskD 信号字典/阈值标定 D3.2 对应）
-    theta_max: float = math.radians(100.0)   # 相对悬垂的最大摆角
+    # 注意：theta_max 必须允许"合法越顶"——起摆/直立本身就是 180°，若设 100° 会在
+    # 正常操作中误触发（2026-11-10 由五幕动画集成复现发现）。发散检测的主力信号
+    # 是角速度与连续疯转（270° = 3/4 圈，正常摆动绝不会越过，疯转必越）。
+    theta_max: float = math.radians(270.0)  # 相对悬垂：拦截连续疯转
+    arm_threshold: float = math.radians(30.0)  # 相对倒立的 armed 阈值
+    fall_threshold: float = math.radians(60.0) # armed 后允许的倒立偏差
     theta_dot_max: float = 20.0              # rad/s
     tau_write_max: float = 5.0               # N·m，写出力矩上限（写路径断言，≤ 不越限；
                                              #   饱和本身是正常工况，不作为发散判据）
@@ -72,6 +79,7 @@ class Governor:
         self._state = GovernorState.NORMAL
         self._state_since = 0.0
         self._last_now = 0.0
+        self._armed = False
 
     # ---------------------------------------------------------- 包络检查
     def envelope_ok(self, theta: float, theta_dot: float, tau_written: float) -> bool:
@@ -84,6 +92,16 @@ class Governor:
             and abs(theta_dot) <= p.theta_dot_max
             and abs(tau_written) <= p.tau_write_max
         )
+
+    def theta_error(self, theta: float) -> float:
+        """相对倒立位的角度误差，范围为 (-π, π]。"""
+        return (math.pi - theta + math.pi) % (2.0 * math.pi) - math.pi
+
+    def _armed_angle_ok(self, theta: float) -> bool:
+        """接近直立后开启角度包络，避免正常起摆穿越 100° 时误触发。"""
+        if abs(self.theta_error(theta)) < self.p.arm_threshold:
+            self._armed = True
+        return not self._armed or abs(self.theta_error(theta)) <= self.p.fall_threshold
 
     # ---------------------------------------------------------- 能量
     def energy(self, theta: float, theta_dot: float) -> float:
@@ -134,7 +152,9 @@ class Governor:
 
         if self._state is GovernorState.NORMAL:
             violated = (
-                not self.envelope_ok(theta, theta_dot, tau_candidate)
+                not self._armed_angle_ok(theta)
+                or abs(theta_dot) > p.theta_dot_max
+                or abs(tau_candidate) > p.tau_write_max
                 or policy_age_s > p.policy_staleness_max_s
                 or overrun_streak > p.overrun_streak_limit
             )
@@ -163,7 +183,13 @@ class Governor:
         self._state = GovernorState.NORMAL
         self._state_since = 0.0
         self._last_now = 0.0
+        self._armed = False
 
     @property
     def state(self) -> GovernorState:
         return self._state
+
+    @property
+    def armed(self) -> bool:
+        """是否已进入过直立区并开启跌落包络。"""
+        return self._armed
