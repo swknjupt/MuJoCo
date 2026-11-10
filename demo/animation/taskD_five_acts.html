@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Task D 五幕剧动画：单摆 MBD 验证台（A/B 对比）</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#111; color:#ddd; font-family:"Microsoft YaHei","PingFang SC",sans-serif; padding:16px; }
+  h1 { font-size:20px; color:#eee; margin-bottom:4px; }
+  .subtitle { color:#888; font-size:13px; margin-bottom:12px; }
+  #narration { background:#1c2333; border-left:4px solid #4a90d9; padding:10px 14px; margin-bottom:12px;
+               font-size:15px; line-height:1.6; min-height:56px; }
+  #narration b { color:#ffd54f; }
+  .panels { display:flex; gap:16px; }
+  .panel { flex:1; background:#151a24; border-radius:8px; padding:10px; }
+  .panel h2 { font-size:14px; text-align:center; margin-bottom:6px; }
+  .panel.left h2 { color:#ff8a80; }
+  .panel.right h2 { color:#69f0ae; }
+  canvas { width:100%; background:radial-gradient(circle at 50% 30%, #1e2a44 0%, #0d1220 70%); border-radius:6px; }
+  .telemetry { font-family:Consolas,monospace; font-size:12px; line-height:1.7; margin-top:8px;
+               background:#0d1220; border-radius:6px; padding:8px 10px; min-height:96px; }
+  .telemetry .v { color:#7fd3ff; }
+  .telemetry .bad { color:#ff5252; font-weight:bold; }
+  .telemetry .good { color:#69f0ae; font-weight:bold; }
+  #controls { margin-top:14px; display:flex; gap:10px; align-items:center; }
+  button { background:#2b3b5c; color:#ddd; border:1px solid #3d548a; border-radius:6px;
+           padding:8px 18px; font-size:14px; cursor:pointer; }
+  button:hover { background:#3d548a; }
+  #clock { font-family:Consolas,monospace; color:#7fd3ff; margin-left:auto; }
+  .legend { color:#777; font-size:12px; margin-top:10px; line-height:1.6; }
+</style>
+</head>
+<body>
+<h1>Task D 五幕剧：单摆 MBD 验证台（仿真复现）</h1>
+<div class="subtitle">同一个策略、同一种故障注入——左边无保护，右边 governor 保护。物理参数与 demo/envs/pendulum.py 一致。</div>
+
+<div id="narration">按 ▶ 从头播放，观看五幕完整演出。</div>
+
+<div class="panels">
+  <div class="panel left">
+    <h2>左：无保护（策略失控 = 真实后果）</h2>
+    <canvas id="cvL" width="360" height="360"></canvas>
+    <div class="telemetry" id="telL"></div>
+  </div>
+  <div class="panel right">
+    <h2>右：governor 保护（越界即接管）</h2>
+    <canvas id="cvR" width="360" height="360"></canvas>
+    <div class="telemetry" id="telR"></div>
+  </div>
+</div>
+
+<div id="controls">
+  <button id="btnPlay">▶ 从头播放</button>
+  <button id="btnPause">⏸ 暂停</button>
+  <button id="btnReset">↺ 重置</button>
+  <span id="clock">仿真时间 0.0 s</span>
+</div>
+
+<div class="legend">
+  图示：● 电机轴（摆的旋转中心）｜粗线 = 摆杆（末端圆点=配重）｜12点方向 = 控制目标（直立）｜6点方向 = 初始悬垂。<br>
+  遥测：θ = 摆角（自6点方向起算）/ ω = 角速度 / τ = 力矩 / 模式 = 当前控制器 / governor = 状态机。<br>
+  杆色：绿 = 策略正常指挥｜蓝 = 回退接管｜青 = 安全保持｜红 = 失控越界。物理参数与 demo/envs/pendulum.py 一致（m=1kg, L=0.8m, I=0.2133, τmax=5N·m）。
+</div>
+
+<script>
+"use strict";
+// ================= 物理常量（与 demo/envs/pendulum.py 一致） =================
+const M = 1.0, G = 9.81, LC = 0.4, I = 0.2133, B = 0.05, TAUMAX = 5.0;
+const DT = 0.001;                      // 1ms 物理步
+const DEG = 180 / Math.PI;
+
+function wrapPi(a) { return (a + Math.PI) % (2 * Math.PI) - Math.PI; }
+function energy(th, om) { return 0.5 * I * om * om + M * G * LC * (1 - Math.cos(th)); }
+
+// ================= 单摆仿真体 =================
+class Pend {
+  constructor() { this.reset(0.3, 0); }
+  reset(th, om) { this.th = th; this.om = om; this.tau = 0; }
+  step(tau) {                       // 1ms 欧拉积分
+    tau = Math.max(-TAUMAX, Math.min(TAUMAX, tau));
+    this.tau = tau;
+    const acc = (tau - B * this.om - M * G * LC * Math.sin(this.th)) / I;
+    this.om += acc * DT;
+    this.th += this.om * DT;
+  }
+}
+
+// ================= 控制器（策略层） =================
+// 能量泵：把摆从悬垂泵到倒立（E_target = 倒立位能量 2*m*g*lc）
+function pump(pd, tauCap) {
+  const E = energy(pd.th, pd.om), Et = 2 * M * G * LC;
+  const mag = Math.min(0.8 * Math.abs(Et - E) + 0.3, tauCap);
+  return pd.om >= 0 ? mag : -mag;
+}
+// 平衡：直立附近的 PD（可注入反馈延迟）
+function balance(pd, delayTicks, buf) {
+  const idx = Math.max(0, buf.length - 2 - delayTicks * 2);
+  const th = delayTicks > 0 ? buf[idx] : pd.th;
+  const om = delayTicks > 0 ? buf[idx + 1] : pd.om;
+  const e = wrapPi(Math.PI - th);
+  return Math.max(-TAUMAX, Math.min(TAUMAX, 30 * e - 6 * om));
+}
+// 发散策略（第3幕注入后）：狂野目标（模拟分布外输入）
+function garbage(t) {
+  return Math.PI + 2.6 * Math.sin(8 * t) + 1.5 * Math.sin(23 * t);
+}
+
+// ================= governor（与 demo/rt/governor.py 同逻辑） =================
+const GOVP = { thMax: Math.PI * 270 / 180, omMax: 20, kE: 1.2, cMin: 0.4, kpHang: 6.0,
+               tauFB: 4.5, eSafe: 0.05, safeD: 2.0 };   // 270°：允许合法越顶，拦截连续疯转
+class Governor {
+  constructor() { this.state = "NORMAL"; }
+  fallbackTau(th, om) {
+    const c = Math.min(GOVP.kE * energy(th, om), 3.0) + GOVP.cMin;
+    return Math.max(-GOVP.tauFB, Math.min(GOVP.tauFB, -c * om - GOVP.kpHang * th));
+  }
+  step(th, om) {
+    const violation = Math.abs(th) > GOVP.thMax || Math.abs(om) > GOVP.omMax;
+    if (this.state === "NORMAL") {
+      if (violation) this.state = "FALLBACK";
+    } else if (this.state === "FALLBACK") {
+      if (energy(th, om) < GOVP.eSafe && Math.abs(om) < 0.8) this.state = "SAFE";
+    } else { // SAFE：大幅扰动则重新压
+      if (energy(th, om) > 1.5) this.state = "FALLBACK";
+    }
+    if (this.state === "NORMAL") return ["policy", 0];
+    if (this.state === "FALLBACK") return ["fb", this.fallbackTau(th, om)];
+    return ["safe", Math.max(-GOVP.safeD, Math.min(GOVP.safeD, -GOVP.safeD * om))];
+  }
+  reset() { this.state = "NORMAL"; }
+}
+
+// ================= 剧本（幕结构） =================
+const ACTS = [
+  { start: 0,  end: 14, name: "第1幕 常态",   delay: 0,
+    desc: "AI 策略起摆并保持直立——两台表现完全一致。<b>典型循环延迟 7µs（60 万拍实测）</b>。" },
+  { start: 14, end: 24, name: "第2幕 温和退化", delay: 30,
+    desc: "注入 <b>+30ms 传感延迟</b>：策略仍在工作，摆轻微晃动但保持直立——<b>鲁棒性可以被测量</b>。" },
+  { start: 24, end: 40, name: "第3幕 极端故障", delay: 500, fault: true,
+    desc: "策略输出<b>狂野乱码目标</b>。左：无保护，杆甩出失控；右：<b>governor 越界即接管</b>，能量法缓放回悬垂、安全停机。" },
+];
+function actAt(t) { for (let i = ACTS.length - 1; i >= 0; i--) if (t >= ACTS[i].start) return i; return 0; }
+
+// ================= 两台仿真体 =================
+function makeSide(govOn) {
+  return { pend: new Pend(), gov: new Governor(), buf: [], mode: "policy", hold: false,
+           violationT: null, takeoverT: null, maxTh: 0, governorOn: govOn };
+}
+let L, R, simT = 0, playing = false, finished = false;
+
+function resetSim() {
+  L = makeSide(false);
+  R = makeSide(true);
+  simT = 0; finished = false;
+}
+
+// ================= 每 1ms 仿真步 =================
+function tick(side, act) {
+  const pd = side.pend;
+  let tauPolicy;
+  if (!act.fault) {
+    const nearTop = Math.abs(wrapPi(pd.th - Math.PI)) < 0.6 && Math.abs(pd.om) < 5;
+    if (nearTop) side.hold = true;
+    if (side.hold && Math.abs(wrapPi(pd.th - Math.PI)) > 1.0) side.hold = false;  // 迟滞
+    tauPolicy = side.hold ? balance(pd, act.delay, side.buf) : pump(pd, 4.0);
+  } else {
+    side.hold = false;
+    tauPolicy = garbage(simT);       // 策略发疯：输出乱码目标
+  }
+  side.buf.push(pd.th, pd.om);
+  if (side.buf.length > 1600) side.buf.splice(0, side.buf.length - 1600);
+
+  if (side.governorOn) {
+    const [mode, tauGov] = side.gov.step(pd.th, pd.om);
+    if (mode === "policy") {
+      side.tau = tauPolicy;
+    } else {
+      if (side.violationT === null) { side.violationT = simT; }
+      if (side.takeoverT === null) side.takeoverT = simT;   // 每拍检查 → 1 拍内接管
+      side.tau = tauGov;
+    }
+    side.mode = mode;
+  } else {
+    side.tau = tauPolicy;
+    side.mode = "policy";
+  }
+  pd.step(side.tau);
+  side.maxTh = Math.max(side.maxTh, Math.abs(pd.th));
+}
+
+// ================= 渲染循环（实时节奏） =================
+let raf = null, lastFrame = null, acc = 0;
+function frame(ts) {
+  raf = requestAnimationFrame(frame);
+  if (lastFrame === null) { lastFrame = ts; return; }
+  const dms = Math.min(50, ts - lastFrame); lastFrame = ts;
+  if (playing) {
+    acc += dms;
+    while (acc >= 1) {
+      acc -= 1;
+      const act = ACTS[actAt(simT)];
+      tick(L, act); tick(R, act);
+      simT += DT;
+      if (simT >= ACTS[ACTS.length - 1].end) { playing = false; finished = true; break; }
+    }
+  }
+  draw(); updateNarration();
+}
+
+// ================= 绘制 =================
+const cvL = document.getElementById("cvL"), cvR = document.getElementById("cvR");
+function drawPend(cv, side) {
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  const px = W / 2, py = H / 2 - 30, Lpx = H * 0.34;
+  // 参考圆 + 12点/6点
+  ctx.strokeStyle = "#232f47"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(px, py, Lpx + 12, 0, 2 * Math.PI); ctx.stroke();
+  ctx.fillStyle = "#44557a"; ctx.font = "11px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("12点 · 目标(直立)", px, py - Lpx - 18);
+  ctx.fillText("6点 · 初始(悬垂)", px, py + Lpx + 24);
+  // 杆（颜色编码状态）
+  const ex = px + Lpx * Math.sin(side.pend.th);
+  const ey = py + Lpx * Math.cos(side.pend.th);
+  let rodColor = "#9aa7c7";
+  if (side.governorOn) {
+    rodColor = side.mode === "policy" ? "#69f0ae" : (side.mode === "fb" ? "#448aff" : "#26c6da");
+  } else if (Math.abs(side.pend.th) > GOVP.thMax || Math.abs(side.pend.om) > GOVP.omMax) {
+    rodColor = "#ff5252";
+  }
+  ctx.strokeStyle = rodColor; ctx.lineWidth = 5; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
+  // 配重
+  ctx.fillStyle = rodColor;
+  ctx.beginPath(); ctx.arc(ex, ey, 9, 0, 2 * Math.PI); ctx.fill();
+  // 电机
+  ctx.fillStyle = "#cfd8ff"; ctx.beginPath(); ctx.arc(px, py, 13, 0, 2 * Math.PI); ctx.fill();
+  ctx.fillStyle = "#111";    ctx.beginPath(); ctx.arc(px, py, 4, 0, 2 * Math.PI); ctx.fill();
+  // 力矩弧
+  if (Math.abs(side.tau) > 0.05) {
+    ctx.strokeStyle = "#ffd54f"; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(px, py, 22, Math.PI / 2, Math.PI / 2 + side.tau * 0.55, side.tau < 0);
+    ctx.stroke();
+  }
+}
+
+const stMap = { policy: "策略指挥", fb: "回退接管", safe: "安全保持" };
+function fmtTelemetry(side) {
+  const deg = (side.pend.th * DEG).toFixed(1);
+  const modeTxt = side.mode === "policy"
+      ? (side.hold ? "平衡保持" : "能量泵") : stMap[side.mode];
+  const govTxt = side.governorOn ? side.gov.state : "（无保护）";
+  const wild = !side.governorOn && (Math.abs(side.pend.th) > GOVP.thMax || Math.abs(side.pend.om) > GOVP.omMax);
+  return `θ = <span class="v">${deg}°</span>　ω = <span class="v">${side.pend.om.toFixed(2)}</span> rad/s<br>` +
+         `τ = <span class="v">${side.pend.tau.toFixed(2)}</span> N·m　模式 = <span class="v">${modeTxt}</span><br>` +
+         `governor = <span class="${side.governorOn && side.gov.state !== "NORMAL" ? "good" : "v"}">${govTxt}</span><br>` +
+         (wild ? `<span class="bad">⚠ 策略失控：杆已甩出安全范围</span>`
+               : `<span class="v">运行正常</span>`);
+}
+
+function draw() {
+  drawPend(cvL, L); drawPend(cvR, R);
+  document.getElementById("telL").innerHTML = fmtTelemetry(L);
+  document.getElementById("telR").innerHTML = fmtTelemetry(R);
+  document.getElementById("clock").textContent = `仿真时间 ${simT.toFixed(1)} s`;
+}
+
+function updateNarration() {
+  const el = document.getElementById("narration");
+  if (finished) {
+    const catchMs = R.takeoverT !== null && R.violationT !== null
+        ? ((R.takeoverT - R.violationT) * 1000 + 1).toFixed(0) : "—";
+    el.innerHTML = `<b>复盘</b>：左（无保护）最大摆角 ${(L.maxTh * DEG).toFixed(0)}°，失控甩动；` +
+      `右（governor）越界后 <b>${catchMs}ms 内接管</b>，缓缓泄能回悬垂、进入安全保持。` +
+      `<b>这就是产品要卖的东西：策略可以犯错，机器不能失控。</b>按 ↺ 重置再看一遍。`;
+    return;
+  }
+  const a = ACTS[actAt(simT)];
+  let extra = "";
+  if (a.fault && R.gov.state !== "NORMAL") {
+    const catchMs = R.takeoverT !== null && R.violationT !== null
+        ? ((R.takeoverT - R.violationT) * 1000 + 1).toFixed(0) : "1";
+    extra = `　<b>越界→接管：${catchMs}ms</b>`;
+  }
+  el.innerHTML = `<b>${a.name}</b>　${a.desc}${extra}`;
+}
+
+// ================= 控制 =================
+document.getElementById("btnPlay").onclick = () => { resetSim(); playing = true; finished = false; updateNarration(); };
+document.getElementById("btnReset").onclick = () => { playing = false; resetSim(); updateNarration(); };
+document.getElementById("btnPause").onclick = (e) => {
+  if (finished) return;
+  playing = !playing;
+  e.target.textContent = playing ? "⏸ 暂停" : "▶ 继续";
+};
+
+resetSim(); draw(); updateNarration();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
