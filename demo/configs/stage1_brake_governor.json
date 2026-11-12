@@ -1,0 +1,18 @@
+{
+  "theta_dot_max": 3.5,
+  "tau_write_max": 5.0,
+  "policy_staleness_max_s": 0.03,
+  "overrun_streak_limit": 3,
+  "k_energy": 0.4,
+  "c_visc_min": 0.6,
+  "kp_hang": 15.0,
+  "tau_fallback_max": 4.5,
+  "e_safe_threshold": 0.3,
+  "safe_damping": 2.0,
+  "mass": 1.0,
+  "l_com": 0.4,
+  "inertia": 0.2133,
+  "theta_max_deg": 270.0,
+  "arm_threshold_deg": 30.0,
+  "fall_threshold_deg": 45.0
+}

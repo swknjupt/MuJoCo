@@ -1,0 +1,13 @@
+{
+  "source": "nominal_demo_model_2026-11-10",
+  "mass_kg": 1.0,
+  "length_m": 0.8,
+  "com_distance_m": 0.4,
+  "inertia_kg_m2": 0.2133,
+  "damping_nm_s_per_rad": 0.05,
+  "coulomb_friction_nm": 0.0,
+  "torque_scale": 1.0,
+  "actuation_delay_us": 0.0,
+  "release_angle_deg": 60.0,
+  "release_velocity_rad_s": 0.0
+}
