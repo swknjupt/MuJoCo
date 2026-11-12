@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/mbd/signal-dict-v0.1.schema.json",
+  "title": "机器人 MBD 九信号记录 v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "timestamp_us",
+    "theta",
+    "theta_dot",
+    "torque_cmd",
+    "policy_target",
+    "policy_latency_ms",
+    "envelope_ok",
+    "governor_state",
+    "injected_fault_id"
+  ],
+  "properties": {
+    "timestamp_us": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "theta": {
+      "type": "number"
+    },
+    "theta_dot": {
+      "type": "number"
+    },
+    "torque_cmd": {
+      "type": "number"
+    },
+    "policy_target": {
+      "type": "number"
+    },
+    "policy_latency_ms": {
+      "type": "number",
+      "minimum": 0
+    },
+    "envelope_ok": {
+      "type": "boolean"
+    },
+    "governor_state": {
+      "type": "string",
+      "enum": ["NORMAL", "FALLBACK", "SAFE", "DISABLED"]
+    },
+    "injected_fault_id": {
+      "type": "string",
+      "pattern": "^(none|(obs_delay|encoder_dropout|torque_attenuation)(\\|(obs_delay|encoder_dropout|torque_attenuation))*)$"
+    }
+  }
+}
