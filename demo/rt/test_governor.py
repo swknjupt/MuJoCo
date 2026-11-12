@@ -41,7 +41,9 @@ def test_divergence_catch() -> None:
     """
     p = GovernorParams()
     gov = Governor(p)
-    plant = PendulumPlant(theta0=0.3, thetadot0=0.0)
+    # 场景必须先到达直立区，armed 后的角度跌落才代表“平衡后被故障甩飞”。
+    # 从悬垂直接注入大目标属于正常起摆路径，不应被角度包络误判。
+    plant = PendulumPlant(theta0=math.pi - 0.2, thetadot0=0.0)
 
     # 场景：策略输出疯狂目标角（模拟发散），1kHz PD 跟踪 → 状态甩出包络
     kp, kd = 25.0, 4.5
@@ -57,11 +59,10 @@ def test_divergence_catch() -> None:
         tau_written = max(-5.0, min(5.0, tau_raw))   # 写出力矩（裁剪后）
 
         if gov.state is GovernorState.NORMAL:
-            if not gov.envelope_ok(plant.theta, plant.theta_dot, tau_written) \
-                    and violation_t is None:
-                violation_t = t
             out = gov.step(plant.theta, plant.theta_dot, tau_written,
                            policy_age_s=0.0, overrun_streak=0, now_s=t)
+            if out.violated and violation_t is None:
+                violation_t = t
             if out.state is GovernorState.FALLBACK and takeover_t is None:
                 takeover_t = t
             tau = tau_written
@@ -88,7 +89,11 @@ def test_divergence_catch() -> None:
 def test_one_way_and_reset() -> None:
     """验收 3：状态单向性 + 人工复位。"""
     gov = Governor()
-    # 制造违约 → FALLBACK
+    # 先正常到达直立附近，armed 后才允许角度跌落判据生效
+    out = gov.step(theta=math.pi, theta_dot=0.0, tau_candidate=0.0, policy_age_s=0.0,
+                   overrun_streak=0, now_s=0.0005)
+    assert out.state is GovernorState.NORMAL and gov.armed
+    # 制造 armed 后角度违约 → FALLBACK
     out = gov.step(theta=1.8, theta_dot=0.0, tau_candidate=0.0, policy_age_s=0.0,
                    overrun_streak=0, now_s=0.001)   # 1.8rad > 100°限
     assert out.state is GovernorState.FALLBACK
@@ -100,7 +105,26 @@ def test_one_way_and_reset() -> None:
     # 人工复位
     gov.reset()
     assert gov.state is GovernorState.NORMAL
+    assert not gov.armed
     print("[验收3] 单向状态机 + 人工复位 ✔")
+
+
+def test_swing_through_is_not_violation() -> None:
+    """正常起摆穿越 100° 但尚未接近直立时不得误触发。"""
+    gov = Governor()
+    for index, theta in enumerate((0.3, 0.9, 1.8, 2.5)):
+        out = gov.step(
+            theta=theta,
+            theta_dot=5.0,
+            tau_candidate=2.0,
+            policy_age_s=0.0,
+            overrun_streak=0,
+            now_s=0.001 * (index + 1),
+        )
+        assert out.state is GovernorState.NORMAL
+        assert not out.violated
+    assert not gov.armed
+    print("[附加] 正常起摆穿越 100° 不误触发 ✔")
 
 
 def test_staleness_and_overrun_triggers() -> None:
@@ -117,5 +141,6 @@ def test_staleness_and_overrun_triggers() -> None:
 if __name__ == "__main__":
     test_divergence_catch()
     test_one_way_and_reset()
+    test_swing_through_is_not_violation()
     test_staleness_and_overrun_triggers()
     print("\n=== D1.5 governor 全部验收通过 ===")
